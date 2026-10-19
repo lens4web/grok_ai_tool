@@ -1,0 +1,78 @@
+name: Build and deploy Grok
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: grok-production
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v6
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@v6
+        with:
+          node-version: '22.23.3'
+          cache: npm
+      - name: Install and check
+        run: |
+          npm ci
+          npm test
+          npm run lint
+          npm run typecheck
+      - name: Build and package
+        run: |
+          npm run build
+          cp -a public .next/standalone/public
+          cp -a .next/static .next/standalone/.next/static
+          tar -czf grok.tgz -C .next/standalone .
+      - name: Check standalone server
+        shell: bash
+        run: |
+          set -euo pipefail
+          (cd .next/standalone && exec env APP_ORIGIN=https://grok.lens4web.com HOSTNAME=127.0.0.1 PORT=3002 node server.js) > /tmp/grok-smoke.log 2>&1 &
+          server_pid=$!
+          trap 'kill "$server_pid" 2>/dev/null || true' EXIT
+          for attempt in {1..30}; do
+            if curl -fsS --max-time 3 -H 'X-Grok-Request: 1' -H 'Origin: https://grok.lens4web.com' http://127.0.0.1:3002/api/session > /dev/null; then
+              curl -fsS --max-time 10 http://127.0.0.1:3002/ > /dev/null
+              SEO_TEST_ORIGIN=http://127.0.0.1:3002 npm run test:seo
+              exit 0
+            fi
+            sleep 1
+          done
+          cat /tmp/grok-smoke.log
+          exit 1
+      - name: Upload and activate release
+        env:
+          DEPLOY_KEY: ${{ secrets.GROK_DEPLOY_KEY }}
+          KNOWN_HOSTS: ${{ secrets.GROK_KNOWN_HOSTS }}
+          DEPLOY_HOST: ${{ secrets.GROK_DEPLOY_HOST }}
+          DEPLOY_USER: ${{ secrets.GROK_DEPLOY_USER || 'grokdeploy' }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          : "${DEPLOY_KEY:?Set GROK_DEPLOY_KEY in repository secrets}"
+          : "${KNOWN_HOSTS:?Set GROK_KNOWN_HOSTS in repository secrets}"
+          : "${DEPLOY_HOST:?Set GROK_DEPLOY_HOST in repository secrets (server IP or hostname)}"
+          : "${DEPLOY_USER:=grokdeploy}"
+          ssh_dir=$(mktemp -d)
+          trap 'rm -rf "$ssh_dir"' EXIT
+          printf '%s\n' "$DEPLOY_KEY" > "$ssh_dir/key"
+          printf '%s\n' "$KNOWN_HOSTS" > "$ssh_dir/known_hosts"
+          chmod 600 "$ssh_dir/key" "$ssh_dir/known_hosts"
+          release="${GITHUB_SHA}-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          ssh_options=(-F /dev/null -i "$ssh_dir/key" -o IdentitiesOnly=yes -o BatchMode=yes -o StrictHostKeyChecking=yes -o UserKnownHostsFile="$ssh_dir/known_hosts" -o ConnectTimeout=15)
+          scp "${ssh_options[@]}" grok.tgz "${DEPLOY_USER}@${DEPLOY_HOST}:/srv/grok/incoming/$release.tgz"
+          ssh "${ssh_options[@]}" "${DEPLOY_USER}@${DEPLOY_HOST}" "/usr/local/bin/grok-deploy $release"

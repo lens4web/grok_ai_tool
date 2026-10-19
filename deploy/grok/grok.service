@@ -1,0 +1,27 @@
+[Unit]
+Description=Grok Next.js standalone application
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=simple
+User=grokdeploy
+Group=grokdeploy
+WorkingDirectory=/srv/grok/current
+Environment=NODE_ENV=production
+Environment=APP_ORIGIN=https://grok.lens4web.com
+Environment=HOSTNAME=127.0.0.1
+Environment=PORT=3002
+ExecStart=/usr/bin/node server.js
+Restart=on-failure
+RestartSec=5
+TimeoutStopSec=30
+UMask=0027
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/srv/grok/releases
+
+[Install]
+WantedBy=multi-user.target
